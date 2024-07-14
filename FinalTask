@@ -1,0 +1,118 @@
+python
+import cv2
+import numpy as np
+import torch
+import torchvision
+import torchvision.transforms as transforms
+from torchvision.models.detection.faster_rcnn import FastRCNNPredictor
+from torchvision.models.detection import FasterRCNN
+from torchvision.models.detection.rpn import AnchorGenerator
+from PIL import Image, ImageDraw, ImageFont
+
+# Load the pre-trained model
+model = torchvision.models.detection.fasterrcnn_resnet50_fpn(pretrained=True)
+
+# Load the custom dataset class
+class LicensePlateDataset(torch.utils.data.Dataset):
+    def __init__(self, images, labels, transforms):
+        self.images = images
+        self.labels = labels
+        self.transforms = transforms
+
+    def __getitem__(self, index):
+        image = self.images[index]
+        label = self.labels[index]
+
+        if self.transforms:
+            image = self.transforms(image)
+
+        return image, label
+
+    def __len__(self):
+        return len(self.images)
+
+# Load the custom dataset
+dataset = LicensePlateDataset(images, labels, transforms.Compose([transforms.ToTensor()]))
+
+# Create a data loader for the dataset
+data_loader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=True)
+
+# Define a function to detect license plates in an image
+def detect_license_plate(image):
+    image = image.convert('RGB')
+    image = transforms.ToTensor()(image)
+    image = image.unsqueeze(0)
+
+    outputs = model(image)
+    outputs = [{k: v.to('cpu') for k, v in t.items()} for t in outputs]
+
+    scores = outputs[0]['scores'].detach().numpy()
+    class_labels = outputs[0]['labels'].detach().numpy()
+    boxes = outputs[0]['boxes'].detach().numpy()
+
+    plate_boxes = []
+    for i, score in enumerate(scores):
+        if score > 0.5 and class_labels[i] == 1:
+            plate_boxes.append(boxes[i])
+
+    return plate_boxes
+
+# Define a function to recognize license plate text
+def recognize_license_plate(image, plate_box):
+    x, y, w, h = plate_box
+    plate_image = image[y:y+h, x:x+w]
+
+    # Pre-process the plate image
+    plate_image = cv2.resize(plate_image, (224, 224))
+    plate_image = plate_image / 255.0
+
+    # Load the OCR model
+    ocr_model = torch.hub.load('ultralytics/yolov3', map_location=torch.device('cuda'))
+
+    # Recognize the license plate text
+    outputs = ocr_model(plate_image)
+    plate_text = outputs.xyxy[0].detach().numpy()[0, -1]
+
+    return plate_text
+
+# Define a function to display the recognized license plate information
+def display_license_plate_info(image, plate_box, plate_text):
+    x, y, w, h = plate_box
+    cv2.rectangle(image, (x, y), (x+w, y+h), (0, 255, 0), 2)
+
+    font = ImageFont.truetype('arial.ttf', 24)
+    image_pil = Image.fromarray(image)
+    draw = ImageDraw.Draw(image_pil)
+    draw.text((x, y-24), plate_text, font=font, fill=(0, 255, 0))
+    image = np.array(image_pil)
+
+    return image
+
+# Capture live video feed from the camera
+cap = cv2.VideoCapture(0)
+
+while True:
+    ret, frame = cap.read()
+    if not ret:
+        break
+
+    # Detect license plates in the frame
+    plate_boxes = detect_license_plate(frame)
+
+    # Recognize license plate text
+    for plate_box in plate_boxes:
+        plate_text = recognize_license_plate(frame, plate_box)
+
+        # Display the recognized license plate information
+        frame = display_license_plate_info(frame, plate_box, plate_text)
+
+    # Display the output
+    cv2.imshow('License Plate Recognition', frame)
+
+    # Exit on key press
+    if cv2.waitKey(1) & 0xFF == ord('q'):
+        break
+
+# Release resources
+cap.release()
+cv2.destroyAllWindows()
